@@ -114,5 +114,22 @@ scrollClick/
 
 ---
 
+## 🤖 Continuous Integration & GitHub Releases
+
+An automated GitHub Actions workflow is configured in [.github/workflows/release.yml](file:///.github/workflows/release.yml).
+
+### Creating a New GitHub Release
+To automatically build `ScrollClick.app`, package it into `ScrollClick-macOS.zip`, and attach it to a new GitHub Release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+### Automated Build Artifacts
+Every push to `main` or pull request automatically compiles the project on a native macOS GitHub runner and uploads `ScrollClick-macOS.zip` as a workflow artifact.
+
+---
+
 ## 📄 License
 MIT License
