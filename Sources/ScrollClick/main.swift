@@ -1,41 +1,51 @@
 import Cocoa
-import SwiftUI
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBarController: StatusBarController?
-    
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Ensure app runs in background mode (no dock icon unless settings window is focused)
+        // Run as a pure background accessory — no Dock icon, no menu bar app menu
         NSApp.setActivationPolicy(.accessory)
-        
-        // Initialize Status Bar Menu
-        statusBarController = StatusBarController()
-        
-        // Start CGEventTap engine
-        ScrollTapEngine.shared.start()
-        
-        // Prompt for accessibility if not yet granted
-        if !AccessibilityManager.shared.isTrusted {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                StatusBarController.sharedWindowPrompt()
+
+        // Wire accessibility trust-change to engine start
+        AccessibilityManager.shared.onTrustChanged = { trusted in
+            DispatchQueue.main.async {
+                if trusted { ScrollTapEngine.shared.start() }
             }
         }
+
+        statusBarController = StatusBarController()
+
+        let cfg = ConfigStore.shared.config
+
+        // Start engine if permitted
+        if cfg.isEnabled {
+            ScrollTapEngine.shared.start()
+        }
+
+        // Show crosshair if configured
+        if cfg.crosshairEnabled {
+            CrosshairOverlay.shared.show(config: cfg)
+        }
+
+        // Prompt for accessibility if not yet granted
+        if !AccessibilityManager.shared.isTrusted {
+            showAccessibilityAlert()
+        }
     }
-    
+
     func applicationWillTerminate(_ notification: Notification) {
         ScrollTapEngine.shared.stop()
+        CrosshairOverlay.shared.hide()
     }
-}
 
-extension StatusBarController {
-    static func sharedWindowPrompt() {
+    private func showAccessibilityAlert() {
         let alert = NSAlert()
-        alert.messageText = "ScrollClick Accessibility Access Needed"
-        alert.informativeText = "ScrollClick needs Accessibility permission in System Settings to detect mouse scrolls and perform clicks in Minecraft."
+        alert.messageText = "ScrollClick needs Accessibility Permission"
+        alert.informativeText = "Open System Settings → Privacy & Security → Accessibility and enable ScrollClick."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
-        
         if alert.runModal() == .alertFirstButtonReturn {
             AccessibilityManager.shared.promptPermission()
             AccessibilityManager.shared.openAccessibilitySettings()

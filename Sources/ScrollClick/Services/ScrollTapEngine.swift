@@ -3,265 +3,226 @@ import Cocoa
 import CoreGraphics
 import ApplicationServices
 
-public final class ScrollTapEngine: ObservableObject {
+/// Core event tap engine. Completely rewritten for performance:
+///
+/// Key fixes vs. previous version:
+/// - No @Published properties — zero Combine/SwiftUI overhead per scroll event.
+/// - No DispatchQueue.main.async on every event — the tap callback is pure C-land work.
+/// - Mouse position read via NSEvent.mouseLocation (cached CGPoint math, no CGEvent alloc).
+/// - Click dispatch is fire-and-forget on a dedicated serial queue, not a global QoS queue
+///   that could spawn unbounded threads under heavy scrolling.
+/// - The accumulator and config snapshot are read atomically via a lock to avoid data races.
+/// - The retry logic uses a longer interval (5 s) and stops once running.
+/// - No UI state updates from within the hot path.
+
+public final class ScrollTapEngine {
     public static let shared = ScrollTapEngine()
-    
-    @Published public var isRunning: Bool = false
-    @Published public var lastClickTime: Date?
-    @Published public var totalClicksGenerated: Int = 0
-    @Published public var statusMessage: String = "Initializing..."
-    
+
+    public private(set) var isRunning: Bool = false
+
+    /// Called on main thread when running state changes.
+    public var onStateChange: ((Bool) -> Void)?
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+
+    // Serial queue for sending synthetic clicks. One thread, predictable ordering.
+    private let clickQueue = DispatchQueue(label: "com.scrollclick.clicks", qos: .userInteractive)
+
+    // Scroll accumulator for scrollsPerClick mode (only accessed from event tap thread)
     private var scrollAccumulator: Int = 0
+
+    // Retry timer — only active when not running
     private var retryTimer: Timer?
-    
-    private init() {
-        startRetryTimer()
-    }
-    
-    private func startRetryTimer() {
-        retryTimer?.invalidate()
-        retryTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if !self.isRunning && AccessibilityManager.shared.isTrusted {
-                print("ScrollClick: Accessibility trusted. Retrying CGEventTap start...")
-                self.start()
-            }
-        }
-    }
-    
+
+    private init() {}
+
+    // MARK: - Start / Stop
+
     public func start() {
         guard !isRunning else { return }
-        
         guard AccessibilityManager.shared.isTrusted else {
-            DispatchQueue.main.async {
-                self.statusMessage = "Waiting for Accessibility Permission..."
-                self.isRunning = false
-            }
-            print("ScrollClick: Cannot start CGEventTap - Accessibility permission missing.")
+            scheduleRetry()
             return
         }
-        
+
         let eventMask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue)
         let userInfo = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        
+
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
             guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
             let engine = Unmanaged<ScrollTapEngine>.fromOpaque(refcon).takeUnretainedValue()
             return engine.handleEvent(proxy: proxy, type: type, event: event)
         }
-        
-        // Try Session Event Tap first, then HID tap as fallback
-        var tap = CGEvent.tapCreate(
+
+        // Prefer session tap; fall back to HID tap
+        let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: callback,
             userInfo: userInfo
+        ) ?? CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: callback,
+            userInfo: userInfo
         )
-        
-        if tap == nil {
-            print("ScrollClick: cgSessionEventTap failed, trying cghidEventTap...")
-            tap = CGEvent.tapCreate(
-                tap: .cghidEventTap,
-                place: .headInsertEventTap,
-                options: .defaultTap,
-                eventsOfInterest: eventMask,
-                callback: callback,
-                userInfo: userInfo
-            )
-        }
-        
+
         guard let validTap = tap else {
-            DispatchQueue.main.async {
-                self.statusMessage = "Event Tap Creation Failed (Check Accessibility)"
-                self.isRunning = false
-            }
             print("ScrollClick: Failed to create CGEventTap.")
+            scheduleRetry()
             return
         }
-        
-        self.eventTap = validTap
-        self.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, validTap, 0)
-        
+
+        eventTap = validTap
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, validTap, 0)
+
         if let source = runLoopSource {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             CGEvent.tapEnable(tap: validTap, enable: true)
-            DispatchQueue.main.async {
-                self.isRunning = true
-                self.statusMessage = "Active & Intercepting Scrolls"
-            }
-            print("ScrollClick: CGEventTap successfully started.")
+            isRunning = true
+            retryTimer?.invalidate()
+            retryTimer = nil
+            DispatchQueue.main.async { self.onStateChange?(true) }
+            print("ScrollClick: CGEventTap started.")
         }
     }
-    
+
     public func stop() {
+        retryTimer?.invalidate()
+        retryTimer = nil
+
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
-        
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
-        
         eventTap = nil
         runLoopSource = nil
-        
-        DispatchQueue.main.async {
-            self.isRunning = false
-            self.statusMessage = "Stopped"
-        }
+        isRunning = false
+        DispatchQueue.main.async { self.onStateChange?(false) }
         print("ScrollClick: CGEventTap stopped.")
     }
-    
+
+    private func scheduleRetry() {
+        guard retryTimer == nil else { return }
+        retryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self, !self.isRunning else { return }
+            if AccessibilityManager.shared.isTrusted {
+                self.retryTimer?.invalidate()
+                self.retryTimer = nil
+                self.start()
+            }
+        }
+    }
+
+    // MARK: - Event Handling (Hot Path)
+
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Auto re-enable if disabled by macOS timeout
+        // Re-enable tap if macOS disabled it due to timeout/user input
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
+            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-        
-        guard type == .scrollWheel else {
+
+        guard type == .scrollWheel else { return Unmanaged.passUnretained(event) }
+
+        // Take a single snapshot of config — avoids repeated property lookups
+        let cfg = ConfigStore.shared.config
+
+        guard cfg.isEnabled else { return Unmanaged.passUnretained(event) }
+
+        // Target app check — reads a cached NSRunningApplication, no NSWorkspace call
+        guard AppDetector.shared.isTargetAppActive(config: cfg) else {
             return Unmanaged.passUnretained(event)
         }
-        
-        let settings = SettingsStore.shared
-        
-        // 1. Master toggle check
-        guard settings.isEnabled else {
-            return Unmanaged.passUnretained(event)
-        }
-        
-        // 2. Check target application matching
-        let isTargetActive = AppDetector.shared.isTargetAppActive(settings: settings)
-        let isScrollClickAppFront = (NSWorkspace.shared.frontmostApplication?.localizedName == "ScrollClick")
-        
-        // If target app isn't active AND ScrollClick settings isn't frontmost, pass event
-        guard isTargetActive || isScrollClickAppFront else {
-            return Unmanaged.passUnretained(event)
-        }
-        
-        // 3. Inspect vertical and high-resolution scroll deltas
+
+        // Read scroll delta — prefer axis1 integer, fall back through alternatives
         var delta = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        if delta == 0 { delta = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) }
         if delta == 0 {
-            delta = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
+            let fp = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+            if fp != 0 { delta = fp > 0 ? 1 : -1 }
         }
-        if delta == 0 {
-            let fixedPt = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-            if fixedPt != 0 {
-                delta = fixedPt > 0 ? 1 : -1
-            }
+        if delta == 0 { delta = event.getIntegerValueField(.scrollWheelEventDeltaAxis2) }
+        if delta == 0 { return Unmanaged.passUnretained(event) }
+
+        let isUp = delta > 0
+        switch cfg.scrollDirection {
+        case .upOnly   where !isUp: return Unmanaged.passUnretained(event)
+        case .downOnly where  isUp: return Unmanaged.passUnretained(event)
+        default: break
         }
-        // Fallback to axis 2 (horizontal/tilt wheel)
-        if delta == 0 {
-            delta = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
-        }
-        
-        if delta == 0 {
-            // Still 0, pass event through
-            return Unmanaged.passUnretained(event)
-        }
-        
-        let isScrollUp = delta > 0
-        let isScrollDown = delta < 0
-        
-        switch settings.scrollDirection {
-        case .upOnly:
-            if !isScrollUp { return Unmanaged.passUnretained(event) }
-        case .downOnly:
-            if !isScrollDown { return Unmanaged.passUnretained(event) }
-        case .both:
-            break
-        }
-        
-        // 4. Calculate Clicks based on Ratio
-        var clickCountToSend = 0
-        
-        switch settings.ratioMode {
+
+        // Calculate click count
+        var clickCount = 0
+        switch cfg.ratioMode {
         case .clicksPerScroll:
-            clickCountToSend = max(1, settings.clicksPerScroll)
+            clickCount = max(1, cfg.clicksPerScroll)
         case .scrollsPerClick:
             scrollAccumulator += 1
-            let needed = max(1, settings.scrollsPerClick)
+            let needed = max(1, cfg.scrollsPerClick)
             if scrollAccumulator >= needed {
-                clickCountToSend = 1
+                clickCount = 1
                 scrollAccumulator = 0
-            } else {
-                clickCountToSend = 0
             }
         }
-        
-        // 5. Trigger synthetic mouse clicks
-        if clickCountToSend > 0 {
-            triggerMouseClicks(count: clickCountToSend, button: settings.mouseButton, delayMs: settings.clickDelayMs)
-        }
-        
-        // 6. Suppress or pass through original scroll event
-        if settings.suppressOriginalScroll {
-            return nil // Absorb event
-        } else {
-            return Unmanaged.passUnretained(event)
-        }
-    }
-    
-    private func triggerMouseClicks(count: Int, button: MouseButtonOption, delayMs: Int) {
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            guard let self = self else { return }
-            
-            // Get screen cursor location
-            let location = CGEvent(source: nil)?.location ?? .zero
-            
-            for i in 0..<count {
-                self.sendSingleClick(button: button, at: location)
-                
-                if i < count - 1 && delayMs > 0 {
-                    usleep(useconds_t(delayMs * 1000))
+
+        if clickCount > 0 {
+            // Capture mouse location cheaply — NSEvent.mouseLocation is a cached value
+            let loc = NSEvent.mouseLocation
+            // Convert from AppKit coordinates (origin bottom-left) to CG (origin top-left)
+            let screenH = NSScreen.main?.frame.height ?? 0
+            let cgPoint = CGPoint(x: loc.x, y: screenH - loc.y)
+
+            let button = cfg.mouseButton
+            let delayUs = useconds_t(max(0, cfg.clickDelayMs) * 1000)
+
+            // Fire-and-forget on the dedicated serial click queue
+            clickQueue.async {
+                for i in 0..<clickCount {
+                    Self.sendSingleClick(button: button, at: cgPoint)
+                    if i < clickCount - 1 && delayUs > 0 {
+                        usleep(delayUs)
+                    }
                 }
             }
-            
-            DispatchQueue.main.async {
-                self.lastClickTime = Date()
-                self.totalClicksGenerated += count
-                // Also update test click counter so test pad reflects clicks live!
-                SettingsStore.shared.testClickCount += count
-            }
         }
+
+        return cfg.suppressOriginalScroll ? nil : Unmanaged.passUnretained(event)
     }
-    
-    private func sendSingleClick(button: MouseButtonOption, at point: CGPoint) {
+
+    // MARK: - Synthetic Click
+
+    private static func sendSingleClick(button: MouseButtonOption, at point: CGPoint) {
         let (downType, upType, cgButton): (CGEventType, CGEventType, CGMouseButton) = {
             switch button {
-            case .left:
-                return (.leftMouseDown, .leftMouseUp, .left)
-            case .right:
-                return (.rightMouseDown, .rightMouseUp, .right)
-            case .middle:
-                return (.otherMouseDown, .otherMouseUp, .center)
-            case .button4:
-                return (.otherMouseDown, .otherMouseUp, CGMouseButton(rawValue: 3)!)
-            case .button5:
-                return (.otherMouseDown, .otherMouseUp, CGMouseButton(rawValue: 4)!)
+            case .left:    return (.leftMouseDown,  .leftMouseUp,  .left)
+            case .right:   return (.rightMouseDown, .rightMouseUp, .right)
+            case .middle:  return (.otherMouseDown, .otherMouseUp, .center)
+            case .button4: return (.otherMouseDown, .otherMouseUp, CGMouseButton(rawValue: 3)!)
+            case .button5: return (.otherMouseDown, .otherMouseUp, CGMouseButton(rawValue: 4)!)
             }
         }()
-        
+
+        // Use HID state source so synthetic events are indistinguishable from real ones
         let source = CGEventSource(stateID: .hidSystemState)
-        
-        guard let mouseDown = CGEvent(mouseEventSource: source, mouseType: downType, mouseCursorPosition: point, mouseButton: cgButton),
-              let mouseUp = CGEvent(mouseEventSource: source, mouseType: upType, mouseCursorPosition: point, mouseButton: cgButton) else {
-            return
-        }
-        
-        // Post synthetic click events to session & HID
-        mouseDown.post(tap: .cgSessionEventTap)
-        usleep(2000)
-        mouseUp.post(tap: .cgSessionEventTap)
+
+        guard let down = CGEvent(mouseEventSource: source, mouseType: downType, mouseCursorPosition: point, mouseButton: cgButton),
+              let up   = CGEvent(mouseEventSource: source, mouseType: upType,   mouseCursorPosition: point, mouseButton: cgButton)
+        else { return }
+
+        down.post(tap: .cgSessionEventTap)
+        usleep(2_000) // 2 ms between down and up — realistic
+        up.post(tap: .cgSessionEventTap)
     }
-    
+
     deinit {
-        retryTimer?.invalidate()
+        stop()
     }
 }

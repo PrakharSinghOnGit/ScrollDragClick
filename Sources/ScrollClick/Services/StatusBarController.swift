@@ -1,142 +1,149 @@
 import Cocoa
-import SwiftUI
-import Combine
 
+/// Minimal menu bar controller. No settings window — everything lives in the config file.
+/// Menu items: Enable/Disable toggle | Open Config File | Crosshair toggle | Quit
 public final class StatusBarController: NSObject {
     private var statusItem: NSStatusItem!
-    private var settingsWindow: NSWindow?
-    private var settingsStore = SettingsStore.shared
-    private var cancellables = Set<AnyCancellable>()
-    
+    private let store = ConfigStore.shared
+
     public override init() {
         super.init()
         setupStatusItem()
-        observeSettings()
+        buildMenu()
+
+        // Rebuild menu whenever config changes (rare — user edits file manually or we toggle)
+        store.onChange = { [weak self] in
+            DispatchQueue.main.async { self?.buildMenu() }
+        }
+
+        // Update icon when engine state changes
+        ScrollTapEngine.shared.onStateChange = { [weak self] _ in
+            DispatchQueue.main.async { self?.buildMenu() }
+        }
     }
-    
+
+    // MARK: - Setup
+
     private func setupStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        updateIcon()
+    }
+
+    private func updateIcon() {
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "computermouse.fill", accessibilityDescription: "ScrollClick")
-            button.target = self
+            let enabled = store.config.isEnabled
+            let symbolName = enabled ? "computermouse.fill" : "computermouse"
+            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "ScrollClick")
+            button.image?.isTemplate = true
         }
-        
-        updateMenu()
     }
-    
-    private func observeSettings() {
-        settingsStore.objectWillChange
-            .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.updateMenu()
-                }
-            }
-            .store(in: &cancellables)
-    }
-    
-    public func updateMenu() {
+
+    // MARK: - Menu
+
+    func buildMenu() {
         let menu = NSMenu()
-        
-        // Header
-        let titleItem = NSMenuItem(title: "ScrollClick v1.0", action: nil, keyEquivalent: "")
-        titleItem.isEnabled = false
-        menu.addItem(titleItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Enable Toggle
-        let toggleTitle = settingsStore.isEnabled ? "Status: Active (Click to Pause)" : "Status: Paused (Click to Enable)"
-        let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(toggleEnabled), keyEquivalent: "t")
-        toggleItem.target = self
-        toggleItem.state = settingsStore.isEnabled ? .on : .off
-        menu.addItem(toggleItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Target App Info
-        let targetText = settingsStore.targetAppMode == .all ? "Target: All Applications" : "Target: \(settingsStore.targetAppName)"
-        let targetItem = NSMenuItem(title: targetText, action: nil, keyEquivalent: "")
-        targetItem.isEnabled = false
-        menu.addItem(targetItem)
-        
-        // Click Configuration Info
-        let ratioText: String
-        if settingsStore.ratioMode == .clicksPerScroll {
-            ratioText = "Config: 1 Scroll = \(settingsStore.clicksPerScroll) Clicks"
-        } else {
-            ratioText = "Config: \(settingsStore.scrollsPerClick) Scrolls = 1 Click"
-        }
-        let ratioItem = NSMenuItem(title: ratioText, action: nil, keyEquivalent: "")
-        ratioItem.isEnabled = false
-        menu.addItem(ratioItem)
-        
-        // Mouse Button Info
-        let buttonItem = NSMenuItem(title: "Trigger: \(settingsStore.mouseButton.shortName)", action: nil, keyEquivalent: "")
-        buttonItem.isEnabled = false
-        menu.addItem(buttonItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Settings Window
-        let settingsItem = NSMenuItem(title: "Preferences & Settings...", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-        
-        // Check Accessibility
-        let accessItem = NSMenuItem(title: "Check Accessibility Permission", action: #selector(checkAccessibility), keyEquivalent: "")
-        accessItem.target = self
-        menu.addItem(accessItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Quit
-        let quitItem = NSMenuItem(title: "Quit ScrollClick", action: #selector(quitApp), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-        
-        statusItem.menu = menu
-    }
-    
-    @objc private func toggleEnabled() {
-        settingsStore.isEnabled.toggle()
-    }
-    
-    @objc public func openSettings() {
-        if settingsWindow == nil {
-            let contentView = SettingsView()
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 540, height: 640),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.center()
-            window.title = "ScrollClick Settings"
-            window.contentView = NSHostingView(rootView: contentView)
-            window.isReleasedWhenClosed = false
-            self.settingsWindow = window
-        }
-        
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
-    }
-    
-    @objc private func checkAccessibility() {
-        AccessibilityManager.shared.checkPermission()
+
+        // -- Header --
+        let header = NSMenuItem(title: "ScrollClick", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        menu.addItem(.separator())
+
+        // -- Enable / Disable --
+        let enabled = store.config.isEnabled
+        let toggleTitle = enabled ? "Enabled  ✓" : "Disabled  ✗"
+        let toggle = NSMenuItem(title: toggleTitle, action: #selector(toggleEnabled), keyEquivalent: "e")
+        toggle.target = self
+        menu.addItem(toggle)
+
+        menu.addItem(.separator())
+
+        // -- Crosshair toggle --
+        let crossTitle = store.config.crosshairEnabled ? "Hide Crosshair" : "Show Crosshair"
+        let crossItem = NSMenuItem(title: crossTitle, action: #selector(toggleCrosshair), keyEquivalent: "x")
+        crossItem.target = self
+        menu.addItem(crossItem)
+
+        menu.addItem(.separator())
+
+        // -- Config file --
+        let configItem = NSMenuItem(title: "Open Config File…", action: #selector(openConfig), keyEquivalent: ",")
+        configItem.target = self
+        menu.addItem(configItem)
+
+        // -- Reload config --
+        let reloadItem = NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "r")
+        reloadItem.target = self
+        menu.addItem(reloadItem)
+
+        menu.addItem(.separator())
+
+        // -- Accessibility --
         if !AccessibilityManager.shared.isTrusted {
-            AccessibilityManager.shared.promptPermission()
-            AccessibilityManager.shared.openAccessibilitySettings()
+            let axItem = NSMenuItem(title: "⚠️ Grant Accessibility Permission", action: #selector(grantAccess), keyEquivalent: "")
+            axItem.target = self
+            menu.addItem(axItem)
+            menu.addItem(.separator())
+        }
+
+        // -- Quit --
+        let quit = NSMenuItem(title: "Quit ScrollClick", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+        updateIcon()
+    }
+
+    // MARK: - Actions
+
+    @objc private func toggleEnabled() {
+        store.update { $0.isEnabled.toggle() }
+        if store.config.isEnabled {
+            ScrollTapEngine.shared.start()
         } else {
-            let alert = NSAlert()
-            alert.messageText = "Accessibility Permission Granted"
-            alert.informativeText = "ScrollClick has full permission to intercept scroll events and generate clicks."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            ScrollTapEngine.shared.stop()
         }
     }
-    
+
+    @objc private func toggleCrosshair() {
+        store.update { $0.crosshairEnabled.toggle() }
+        let cfg = store.config
+        if cfg.crosshairEnabled {
+            CrosshairOverlay.shared.show(config: cfg)
+        } else {
+            CrosshairOverlay.shared.hide()
+        }
+    }
+
+    @objc private func openConfig() {
+        // Open the config file in the default text editor
+        NSWorkspace.shared.open(URL(fileURLWithPath: store.configFilePath))
+    }
+
+    @objc private func reloadConfig() {
+        store.reload()
+        let cfg = store.config
+        // Re-sync crosshair state
+        if cfg.crosshairEnabled {
+            CrosshairOverlay.shared.show(config: cfg)
+        } else {
+            CrosshairOverlay.shared.hide()
+        }
+        // Re-sync engine state
+        if cfg.isEnabled && !ScrollTapEngine.shared.isRunning {
+            ScrollTapEngine.shared.start()
+        } else if !cfg.isEnabled && ScrollTapEngine.shared.isRunning {
+            ScrollTapEngine.shared.stop()
+        }
+    }
+
+    @objc private func grantAccess() {
+        AccessibilityManager.shared.promptPermission()
+        AccessibilityManager.shared.openAccessibilitySettings()
+    }
+
     @objc private func quitApp() {
         NSApplication.shared.terminate(nil)
     }
