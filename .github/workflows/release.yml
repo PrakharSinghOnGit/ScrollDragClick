@@ -17,16 +17,29 @@ permissions:
 jobs:
   build-and-release:
     name: Build macOS App & Release
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Cache Swift Package Manager artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
       - name: Build & Package ScrollClick.app
         run: |
           chmod +x build.sh
           ./build.sh
+
+      - name: Verify binary was produced
+        run: |
+          test -f ScrollClick.app/Contents/MacOS/ScrollClick
+          echo "✅ Binary size: $(du -sh ScrollClick.app/Contents/MacOS/ScrollClick | cut -f1)"
 
       - name: Compress ScrollClick.app to ZIP
         run: |
@@ -45,15 +58,31 @@ jobs:
           files: ScrollClick-macOS.zip
           name: ScrollClick ${{ github.ref_name }}
           body: |
-            ## ScrollClick Release ${{ github.ref_name }} 🖱️⚡
+            ## ScrollClick ${{ github.ref_name }} 🖱️⚡
 
-            ### What's Included:
-            - **ScrollClick-macOS.zip**: Native macOS background Menu Bar application for Minecraft drag-clicking and scroll-to-mouse trigger.
+            A lightweight macOS menu bar utility that converts scroll wheel events into mouse clicks — perfect for Minecraft drag-clicking, bridging, or any game that benefits from rapid clicks.
 
-            ### Installation:
-            1. Download `ScrollClick-macOS.zip` and extract `ScrollClick.app`.
-            2. Double-click `ScrollClick.app` to launch.
-            3. Grant **Accessibility** permission in **System Settings → Privacy & Security → Accessibility** when prompted.
+            ### Installation
+            1. Download `ScrollClick-macOS.zip` and extract `ScrollClick.app`
+            2. Double-click `ScrollClick.app` to launch — it lives in the **menu bar only** (no Dock icon)
+            3. Grant **Accessibility** permission when prompted: System Settings → Privacy & Security → Accessibility
+
+            ### Configuration
+            All settings are stored in a plain JSON file — no UI needed:
+            ```
+            ~/.config/scrollclick/config.json
+            ```
+            Edit in any text editor, then choose **Reload Config** from the menu bar icon.
+
+            ### Menu Bar Options
+            - **Enabled / Disabled** — master toggle (`E`)
+            - **Show / Hide Crosshair** — pixel-perfect centre crosshair (`X`)
+            - **Open Config File…** — opens config in default editor (`,`)
+            - **Reload Config** — picks up edits without restarting (`R`)
+            - **Quit ScrollClick** (`Q`)
+
+            ### Crosshair
+            Configurable dot or cross crosshair drawn at the exact pixel centre of your display. Supports custom colour (`#RRGGBB`), size, thickness, and opacity. Fully click-through — does not interfere with games.
           draft: false
           prerelease: false
         env:
