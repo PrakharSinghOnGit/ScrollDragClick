@@ -48,6 +48,15 @@ public struct AppConfig: Codable {
     public var crosshairSize: Int = 20       // px: radius for cross arms / radius for dot
     public var crosshairThickness: Int = 2   // px: line width (cross only)
     public var crosshairOpacity: Double = 1.0
+
+    // Ninjabrain Bot Overlay
+    public var ninjabrainEnabled: Bool = false
+    public var ninjabrainX: Double = 20.0
+    public var ninjabrainY: Double = 20.0
+    public var ninjabrainMaxRows: Int = 3
+    public var ninjabrainPollRateMs: Int = 200
+    public var ninjabrainFontSize: Double = 14.0
+    public var ninjabrainColorHex: String = "#FFFFFF"
 }
 
 // MARK: - ConfigStore

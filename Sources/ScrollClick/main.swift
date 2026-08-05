@@ -28,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CrosshairOverlay.shared.show(config: cfg)
         }
 
+        // Show Ninjabrain overlay if configured
+        if cfg.ninjabrainEnabled {
+            NinjabrainOverlay.shared.show(config: cfg)
+        }
+
         // Prompt for accessibility if not yet granted
         if !AccessibilityManager.shared.isTrusted {
             showAccessibilityAlert()
@@ -37,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         ScrollTapEngine.shared.stop()
         CrosshairOverlay.shared.hide()
+        NinjabrainOverlay.shared.hide()
     }
 
     private func showAccessibilityAlert() {

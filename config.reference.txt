@@ -1,0 +1,61 @@
+# ScrollClick Configuration
+# Location: ~/.config/scrollclick/config.json
+#
+# Edit this file in any text editor, then choose "Reload Config" from the menu bar icon.
+# Changes take effect immediately after reload — no restart needed.
+#
+# ─────────────────────────────────────────────────────────────
+# FIELD REFERENCE
+# ─────────────────────────────────────────────────────────────
+#
+# isEnabled          true | false
+#   Master toggle. When false, all scroll events pass through unmodified.
+#
+# targetAppMode      "all" | "specific"
+#   "all"      – ScrollClick fires on every app.
+#   "specific" – Only fires when targetAppName / targetAppBundleId is frontmost.
+#
+# targetAppName      string  (substring match, case-insensitive)
+#   e.g. "Minecraft", "Lunar Client", "java"
+#
+# targetAppBundleId  string  (substring match, case-insensitive)
+#   e.g. "com.mojang.minecraftpe"   Leave blank to match by name only.
+#
+# ratioMode          "clicksPerScroll" | "scrollsPerClick"
+#   clicksPerScroll  – Each scroll tick fires N clicks.
+#   scrollsPerClick  – N scroll ticks are needed before 1 click fires.
+#
+# clicksPerScroll    integer ≥ 1   (used when ratioMode = "clicksPerScroll")
+# scrollsPerClick    integer ≥ 1   (used when ratioMode = "scrollsPerClick")
+#
+# clickDelayMs       integer ≥ 0   Milliseconds between consecutive clicks when > 1.
+#
+# scrollDirection    "both" | "upOnly" | "downOnly"
+#   Which scroll directions trigger clicks.
+#
+# mouseButton        "left" | "right" | "middle" | "button4" | "button5"
+#
+# suppressOriginalScroll  true | false
+#   true  – The scroll event is consumed (page doesn't scroll).
+#   false – The scroll event is passed through after generating clicks.
+#
+# ── Crosshair ──
+# crosshairEnabled   true | false
+# crosshairShape     "dot" | "cross"
+# crosshairColorHex  "#RRGGBB"  e.g. "#FF0000" (red), "#00FF00" (green), "#FFFFFF" (white)
+# crosshairSize      integer ≥ 2   Radius in pixels (arm length for cross, dot radius for dot)
+# crosshairThickness integer ≥ 1   Line width in pixels (cross shape only)
+# crosshairOpacity   0.0 – 1.0
+#
+# ── Ninjabrain Bot Overlay ──
+# ninjabrainEnabled    true | false
+# ninjabrainX          float  (Horizontal position)
+# ninjabrainY          float  (Vertical position)
+# ninjabrainMaxRows    integer ≥ 1
+# ninjabrainPollRateMs integer ≥ 50
+# ninjabrainFontSize   float
+# ninjabrainColorHex   "#RRGGBB"
+# ─────────────────────────────────────────────────────────────
+#
+# The actual config is the JSON below this comment block.
+# (This file is a reference — the app reads config.json, not this file.)

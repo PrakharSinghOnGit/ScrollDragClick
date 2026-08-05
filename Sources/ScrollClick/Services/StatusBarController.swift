@@ -65,6 +65,12 @@ public final class StatusBarController: NSObject {
         crossItem.target = self
         menu.addItem(crossItem)
 
+        // -- Ninjabrain toggle --
+        let ninjaTitle = store.config.ninjabrainEnabled ? "Hide Ninjabrain" : "Show Ninjabrain"
+        let ninjaItem = NSMenuItem(title: ninjaTitle, action: #selector(toggleNinjabrain), keyEquivalent: "n")
+        ninjaItem.target = self
+        menu.addItem(ninjaItem)
+
         menu.addItem(.separator())
 
         // -- Config file --
@@ -117,6 +123,16 @@ public final class StatusBarController: NSObject {
         }
     }
 
+    @objc private func toggleNinjabrain() {
+        store.update { $0.ninjabrainEnabled.toggle() }
+        let cfg = store.config
+        if cfg.ninjabrainEnabled {
+            NinjabrainOverlay.shared.show(config: cfg)
+        } else {
+            NinjabrainOverlay.shared.hide()
+        }
+    }
+
     @objc private func openConfig() {
         // Open the config file in the default text editor
         NSWorkspace.shared.open(URL(fileURLWithPath: store.configFilePath))
@@ -130,6 +146,13 @@ public final class StatusBarController: NSObject {
             CrosshairOverlay.shared.show(config: cfg)
         } else {
             CrosshairOverlay.shared.hide()
+        }
+        // Re-sync ninjabrain state
+        if cfg.ninjabrainEnabled {
+            NinjabrainOverlay.shared.update(config: cfg)
+            NinjabrainOverlay.shared.show(config: cfg)
+        } else {
+            NinjabrainOverlay.shared.hide()
         }
         // Re-sync engine state
         if cfg.isEnabled && !ScrollTapEngine.shared.isRunning {
